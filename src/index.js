@@ -8,26 +8,20 @@ const PINTEREST_HEADERS = {
 };
 
 // ====================== CORS HEADERS ======================
-// Solusi ampuh: Tangkap header apa pun yang diminta Claude secara dinamis
-// untuk menghindari pemblokiran Preflight CORS.
+// Dinamis menangkap header Claude untuk mencegah pemblokiran Preflight (Sangat Krusial)
 function getCorsHeaders(request) {
-  const reqHeaders = request.headers.get('Access-Control-Request-Headers') || '*';
+  const origin = request.headers.get('Origin') || '*';
   return {
-    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Origin': origin,
     'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-    'Access-Control-Allow-Headers': reqHeaders,
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-api-key, baggage, sentry-trace',
+    'Access-Control-Allow-Credentials': 'true',
     'Access-Control-Expose-Headers': '*',
   };
 }
 
-function corsResponse(request, body, status = 200, extra = {}) {
-  return new Response(body, {
-    status,
-    headers: { ...getCorsHeaders(request), 'Content-Type': 'application/json', ...extra },
-  });
-}
-
 // ====================== PINTEREST API ======================
+// (FUNGSI PINTEREST TIDAK DISENTUH SAMA SEKALI)
 async function pinterestAPI(resource, options) {
   const url = `https://www.pinterest.com/resource/${resource}/get/`;
   const params = new URLSearchParams({
@@ -191,50 +185,40 @@ const TOOLS = [
 async function handleMCPMessage(msg) {
   const { method, id, params } = msg;
 
-  if (method === 'notifications/initialized') {
-    return null;
-  }
+  try {
+    if (method === 'notifications/initialized') {
+      return null; 
+    }
 
-  if (method === 'ping') {
-    return { jsonrpc: '2.0', id, result: {} };
-  }
+    if (method === 'ping') {
+      return { jsonrpc: '2.0', id, result: {} };
+    }
 
-  if (method === 'initialize') {
-    return {
-      jsonrpc: '2.0',
-      id,
-      result: {
-        protocolVersion: '2024-11-05',
-        capabilities: {
-          tools: { listChanged: false },
-          resources: {},
-          prompts: {},
-          logging: {},
+    if (method === 'initialize') {
+      return {
+        jsonrpc: '2.0',
+        id,
+        result: {
+          protocolVersion: '2024-11-05',
+          capabilities: { tools: {} }, // Disederhanakan agar Claude tidak komplain validasi
+          serverInfo: { name: 'pinterest-mcp', version: '1.0.0' },
         },
-        serverInfo: {
-          name: 'pinterest-mcp-server',
-          version: '1.0.0',
-        },
-      },
-    };
-  }
+      };
+    }
 
-  if (method === 'tools/list') {
-    return {
-      jsonrpc: '2.0',
-      id,
-      result: {
-        tools: TOOLS,
-        nextCursor: null,
-      },
-    };
-  }
+    if (method === 'tools/list') {
+      return {
+        jsonrpc: '2.0',
+        id,
+        result: { tools: TOOLS, nextCursor: null },
+      };
+    }
 
-  if (method === 'tools/call') {
-    const { name, arguments: args = {} } = params || {};
-    const limit = args?.limit || 10;
-    try {
+    if (method === 'tools/call') {
+      const { name, arguments: args = {} } = params || {};
+      const limit = parseInt(args?.limit) || 10;
       let result;
+
       if (name === 'pinterest_board_search') {
         result = await searchBoards(args.query, limit);
       } else if (name === 'pinterest_user_search') {
@@ -248,6 +232,7 @@ async function handleMCPMessage(msg) {
           error: { code: -32601, message: `Unknown tool: ${name}` },
         };
       }
+
       return {
         jsonrpc: '2.0',
         id,
@@ -256,41 +241,32 @@ async function handleMCPMessage(msg) {
           isError: false,
         },
       };
-    } catch (err) {
-      return {
-        jsonrpc: '2.0',
-        id,
-        result: {
-          content: [{ type: 'text', text: `Error: ${err.message}` }],
-          isError: true,
-        },
-      };
     }
-  }
 
-  if (method === 'resources/list') {
-    return { jsonrpc: '2.0', id, result: { resources: [], nextCursor: null } };
-  }
-  if (method === 'prompts/list') {
-    return { jsonrpc: '2.0', id, result: { prompts: [], nextCursor: null } };
-  }
+    if (method === 'resources/list') return { jsonrpc: '2.0', id, result: { resources: [], nextCursor: null } };
+    if (method === 'prompts/list') return { jsonrpc: '2.0', id, result: { prompts: [], nextCursor: null } };
 
-  return {
-    jsonrpc: '2.0',
-    id,
-    error: { code: -32601, message: `Method not found: ${method}` },
-  };
+    return {
+      jsonrpc: '2.0',
+      id,
+      error: { code: -32601, message: `Method not found: ${method}` },
+    };
+  } catch (err) {
+    return {
+      jsonrpc: '2.0',
+      id,
+      error: { code: -32603, message: `Internal error: ${err.message}` },
+    };
+  }
 }
 
 // ====================== DURABLE OBJECT ======================
+// Dirombak total meniru pattern dari @modelcontextprotocol/sdk
 export class MCPSession {
   constructor(state, env) {
     this.state = state;
     this.env = env;
     this.writer = null;
-    this.encoder = new TextEncoder();
-    this.queue = [];
-    this.heartbeatTimer = null;
   }
 
   async fetch(request) {
@@ -300,103 +276,80 @@ export class MCPSession {
       return new Response(null, { status: 204, headers: getCorsHeaders(request) });
     }
 
-    if (request.method === 'GET') {
-      return this._openSSE(request, url);
+    if (request.method === 'GET' && url.pathname === '/sse') {
+      const { readable, writable } = new TransformStream();
+      this.writer = writable.getWriter();
+      
+      const sessionId = url.searchParams.get('sessionId');
+      // WAJIB: Pastikan protokol menggunakan HTTPS (Jika hostname bukan localhost)
+      const protocol = url.hostname.includes('localhost') ? 'http:' : 'https:';
+      const postUrl = `${protocol}//${url.host}/message?sessionId=${sessionId}`;
+
+      // Segera kirim URL absolute ke Claude
+      this.writer.write(new TextEncoder().encode(`event: endpoint\ndata: ${postUrl}\n\n`));
+
+      // Keepalive berjalan di background
+      const keepAlive = setInterval(() => {
+        if (this.writer) {
+          this.writer.write(new TextEncoder().encode(': keepalive\n\n')).catch(() => clearInterval(keepAlive));
+        } else {
+          clearInterval(keepAlive);
+        }
+      }, 15000);
+
+      request.signal.addEventListener('abort', () => {
+        this.writer = null;
+        clearInterval(keepAlive);
+      });
+
+      return new Response(readable, {
+        status: 200,
+        headers: {
+          ...getCorsHeaders(request),
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache',
+          'Connection': 'keep-alive'
+        }
+      });
     }
 
-    if (request.method === 'POST') {
-      return this._receiveMessage(request);
-    }
-
-    return new Response('Method Not Allowed', { status: 405, headers: getCorsHeaders(request) });
-  }
-
-  _openSSE(request, url) {
-    const { writable, readable } = new TransformStream();
-    this.writer = writable.getWriter();
-    
-    const sessionId = url.searchParams.get('sessionId');
-    // Format Wajib MCP/Claude: Absolute URL untuk endpoint pesan
-    const baseUrl = `${url.protocol}//${url.host}`;
-
-    (async () => {
-      try {
-        await this._send(`event: endpoint\ndata: ${baseUrl}/message?sessionId=${sessionId}\n\n`);
-
-        await this._drainQueue();
-
-        // Cloudflare otomatis kirim : keepalive, tapi ini sebagai fallback tambahan
-        this.heartbeatTimer = setInterval(() => {
-          this._send(': ping\n\n').catch(() => this._cleanup());
-        }, 20000);
-
-        await new Promise(resolve => request.signal.addEventListener('abort', resolve));
-      } finally {
-        this._cleanup();
+    if (request.method === 'POST' && url.pathname === '/message') {
+      if (!this.writer) {
+        return new Response('SSE connection not active', { status: 400, headers: getCorsHeaders(request) });
       }
-    })();
 
-    return new Response(readable, {
-      status: 200,
-      headers: {
-        ...getCorsHeaders(request),
-        'Content-Type': 'text/event-stream; charset=utf-8',
-        'Cache-Control': 'no-cache, no-transform',
-        'Connection': 'keep-alive',
-        'X-Accel-Buffering': 'no',
-      },
-    });
+      let body;
+      try {
+        body = await request.json();
+      } catch (err) {
+        return new Response('Invalid JSON', { status: 400, headers: getCorsHeaders(request) });
+      }
+
+      // Jalankan proses secara asynchronous dan LANGSUNG balas HTTP 202 ke Claude.
+      this.processMessage(body).catch(console.error);
+      return new Response(null, { status: 202, headers: getCorsHeaders(request) });
+    }
+
+    return new Response('Not Found', { status: 404, headers: getCorsHeaders(request) });
   }
 
-  async _receiveMessage(request) {
-    let body;
-    try {
-      body = await request.json();
-    } catch {
-      return corsResponse(request, JSON.stringify({ error: 'Invalid JSON' }), 400);
-    }
+  async processMessage(body) {
+    const encoder = new TextEncoder();
+    const send = async (msg) => {
+      if (this.writer) {
+        try {
+          await this.writer.write(encoder.encode(`event: message\ndata: ${JSON.stringify(msg)}\n\n`));
+        } catch (e) {
+          this.writer = null;
+        }
+      }
+    };
 
     const messages = Array.isArray(body) ? body : [body];
-    const responses = [];
-
     for (const msg of messages) {
-      const response = await handleMCPMessage(msg);
-      if (response !== null) responses.push(response);
+      const resp = await handleMCPMessage(msg);
+      if (resp !== null) await send(resp); // Hanya kirim jika ada response (notifikasi = null)
     }
-
-    for (const resp of responses) {
-      const event = `event: message\ndata: ${JSON.stringify(resp)}\n\n`;
-      if (this.writer) {
-        await this._send(event);
-      } else {
-        this.queue.push(event);
-      }
-    }
-
-    // [KRITIKAL] Spesifikasi MCP mewajibkan Response 202 dengan BODY KOSONG.
-    // Jika tidak kosong, parsing Claude bisa gagal total.
-    return new Response(null, { status: 202, headers: getCorsHeaders(request) });
-  }
-
-  async _send(text) {
-    if (!this.writer) return;
-    try {
-      await this.writer.write(this.encoder.encode(text));
-    } catch {
-      this._cleanup();
-    }
-  }
-
-  async _drainQueue() {
-    while (this.queue.length > 0 && this.writer) {
-      const msg = this.queue.shift();
-      await this._send(msg);
-    }
-  }
-
-  _cleanup() {
-    if (this.heartbeatTimer) { clearInterval(this.heartbeatTimer); this.heartbeatTimer = null; }
-    if (this.writer) { this.writer.close().catch(() => {}); this.writer = null; }
   }
 }
 
@@ -405,18 +358,14 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
 
-    // Tangani OPTIONS CORS dari Claude
     if (request.method === 'OPTIONS') {
       return new Response(null, { status: 204, headers: getCorsHeaders(request) });
     }
 
     if (url.pathname === '/' || url.pathname === '/health') {
-      return corsResponse(request, JSON.stringify({
-        name: 'pinterest-mcp-server',
-        version: '1.0.0',
-        status: 'ok',
-        transport: 'SSE (2024-11-05)',
-      }));
+      return new Response(JSON.stringify({ status: 'ok', transport: 'SSE (2024-11-05)' }), {
+        headers: { ...getCorsHeaders(request), 'Content-Type': 'application/json' }
+      });
     }
 
     if (url.pathname === '/sse') {
@@ -430,21 +379,19 @@ export default {
       
       const doUrl = new URL(request.url);
       doUrl.searchParams.set('sessionId', sessionId);
-      const doRequest = new Request(doUrl.toString(), request);
-      
-      return stub.fetch(doRequest);
+      return stub.fetch(new Request(doUrl.toString(), request));
     }
 
     if (url.pathname === '/message') {
       const sessionId = url.searchParams.get('sessionId');
-      if (!sessionId || sessionId === 'undefined') {
-        return corsResponse(request, JSON.stringify({ error: 'Missing or invalid sessionId' }), 400);
+      if (!sessionId) {
+        return new Response('Missing sessionId', { status: 400, headers: getCorsHeaders(request) });
       }
       const doId = env.MCP_SESSION.idFromName(sessionId);
       const stub = env.MCP_SESSION.get(doId);
       return stub.fetch(request);
     }
 
-    return corsResponse(request, JSON.stringify({ error: 'Not Found' }), 404);
+    return new Response('Not Found', { status: 404, headers: getCorsHeaders(request) });
   },
 };
