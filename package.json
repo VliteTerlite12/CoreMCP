@@ -1,0 +1,8 @@
+{
+  "name": "pinterest-mcp",
+  "version": "1.0.0",
+  "description": "MCP Server for Pinterest without login, using SSE transport on Cloudflare Workers.",
+  "main": "src/index.js",
+  "author": "Your Name",
+  "license": "MIT"
+}
