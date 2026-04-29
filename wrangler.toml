@@ -1,12 +1,12 @@
-name = "pinterest-mcp"
+name = "cmcp"
 main = "src/index.js"
 compatibility_date = "2024-12-18"
 workers_dev = true
 
 [[durable_objects.bindings]]
-name = "MCP_SESSION"
-class_name = "MCPSession"
+name = "MCP_OBJECT"
+class_name = "MCPObject"
 
 [[migrations]]
 tag = "v1"
-new_sqlite_classes = ["MCPSession"]
+new_sqlite_classes = ["MCPObject"]

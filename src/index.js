@@ -8,7 +8,6 @@ const PINTEREST_HEADERS = {
 };
 
 // ====================== CORS HEADERS ======================
-// Dinamis menangkap header Claude untuk mencegah pemblokiran Preflight (Sangat Krusial)
 function getCorsHeaders(request) {
   const origin = request.headers.get('Origin') || '*';
   return {
@@ -21,7 +20,6 @@ function getCorsHeaders(request) {
 }
 
 // ====================== PINTEREST API ======================
-// (FUNGSI PINTEREST TIDAK DISENTUH SAMA SEKALI)
 async function pinterestAPI(resource, options) {
   const url = `https://www.pinterest.com/resource/${resource}/get/`;
   const params = new URLSearchParams({
@@ -200,7 +198,7 @@ async function handleMCPMessage(msg) {
         id,
         result: {
           protocolVersion: '2024-11-05',
-          capabilities: { tools: {} }, // Disederhanakan agar Claude tidak komplain validasi
+          capabilities: { tools: {} },
           serverInfo: { name: 'pinterest-mcp', version: '1.0.0' },
         },
       };
@@ -261,8 +259,8 @@ async function handleMCPMessage(msg) {
 }
 
 // ====================== DURABLE OBJECT ======================
-// Dirombak total meniru pattern dari @modelcontextprotocol/sdk
-export class MCPSession {
+// DIKEMBALIKAN KE NAMA LAMA AGAR CLOUDFLARE TIDAK ERROR (CODE 10064)
+export class MCPObject {
   constructor(state, env) {
     this.state = state;
     this.env = env;
@@ -281,14 +279,11 @@ export class MCPSession {
       this.writer = writable.getWriter();
       
       const sessionId = url.searchParams.get('sessionId');
-      // WAJIB: Pastikan protokol menggunakan HTTPS (Jika hostname bukan localhost)
       const protocol = url.hostname.includes('localhost') ? 'http:' : 'https:';
       const postUrl = `${protocol}//${url.host}/message?sessionId=${sessionId}`;
 
-      // Segera kirim URL absolute ke Claude
       this.writer.write(new TextEncoder().encode(`event: endpoint\ndata: ${postUrl}\n\n`));
 
-      // Keepalive berjalan di background
       const keepAlive = setInterval(() => {
         if (this.writer) {
           this.writer.write(new TextEncoder().encode(': keepalive\n\n')).catch(() => clearInterval(keepAlive));
@@ -325,7 +320,6 @@ export class MCPSession {
         return new Response('Invalid JSON', { status: 400, headers: getCorsHeaders(request) });
       }
 
-      // Jalankan proses secara asynchronous dan LANGSUNG balas HTTP 202 ke Claude.
       this.processMessage(body).catch(console.error);
       return new Response(null, { status: 202, headers: getCorsHeaders(request) });
     }
@@ -348,7 +342,7 @@ export class MCPSession {
     const messages = Array.isArray(body) ? body : [body];
     for (const msg of messages) {
       const resp = await handleMCPMessage(msg);
-      if (resp !== null) await send(resp); // Hanya kirim jika ada response (notifikasi = null)
+      if (resp !== null) await send(resp); 
     }
   }
 }
@@ -374,8 +368,8 @@ export default {
       }
       
       const sessionId = crypto.randomUUID();
-      const doId = env.MCP_SESSION.idFromName(sessionId);
-      const stub = env.MCP_SESSION.get(doId);
+      const doId = env.MCP_OBJECT.idFromName(sessionId);
+      const stub = env.MCP_OBJECT.get(doId);
       
       const doUrl = new URL(request.url);
       doUrl.searchParams.set('sessionId', sessionId);
@@ -387,8 +381,8 @@ export default {
       if (!sessionId) {
         return new Response('Missing sessionId', { status: 400, headers: getCorsHeaders(request) });
       }
-      const doId = env.MCP_SESSION.idFromName(sessionId);
-      const stub = env.MCP_SESSION.get(doId);
+      const doId = env.MCP_OBJECT.idFromName(sessionId);
+      const stub = env.MCP_OBJECT.get(doId);
       return stub.fetch(request);
     }
 
