@@ -138,43 +138,51 @@ export class MCPObject {
 
     if (request.method === 'OPTIONS') {
       return new Response(null, {
-        headers: { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'GET, POST, OPTIONS' },
+        headers: {
+          'Access-Control-Allow-Origin': '*',
+          'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+        },
       });
     }
 
     if (request.method === 'GET') {
-      // SSE connection
       const { writable, readable } = new TransformStream();
       this.writer = writable.getWriter();
       const encoder = new TextEncoder();
 
-      // Kirim endpoint event + heartbeat dalam background
-      this._startHeartbeat(encoder);
+      // FIX: Jalankan semua async work di background, JANGAN di-await
+      // Dulu return Response ada di bawah await → deadlock (browser tunggu response,
+      // worker tunggu browser abort → stuck selamanya)
+      (async () => {
+        // Heartbeat setiap 30 detik biar koneksi ga mati
+        this.keepAlive = setInterval(() => {
+          if (this.writer) {
+            this.writer.write(encoder.encode(': keepalive\n\n')).catch(() => {});
+          }
+        }, 30000);
 
-      // Kirim event endpoint dengan sessionId
-      const sessionId = this.state.id.name; // Sama dengan sessionId di URL
-      const endpointEvent = `event: endpoint\ndata: /message?sessionId=${sessionId}\n\n`;
+        const sessionId = this.state.id.name;
+        const endpointEvent = `event: endpoint\ndata: /message?sessionId=${sessionId}\n\n`;
 
-      try {
-        await this.writer.ready;
-        await this.writer.write(encoder.encode(endpointEvent));
-      } catch (e) {
-        // Client mungkin sudah disconnect
-        this._cleanup();
-        return new Response(null, { status: 500 });
-      }
+        try {
+          await this.writer.ready;
+          await this.writer.write(encoder.encode(endpointEvent));
+        } catch (e) {
+          this._cleanup();
+          return;
+        }
 
-      // Setelah kirim endpoint, kirim antrian jika ada (biasanya kosong)
-      await this._drainQueue(encoder);
+        await this._drainQueue(encoder);
 
-      // Tunggu koneksi ditutup client
-      await new Promise(resolve => {
-        request.signal.addEventListener('abort', () => {
-          resolve();
+        // Tunggu sampai client disconnect
+        await new Promise(resolve => {
+          request.signal.addEventListener('abort', resolve);
         });
-      });
 
-      this._cleanup();
+        this._cleanup();
+      })();
+
+      // Return Response LANGSUNG — jangan tunggu apapun
       return new Response(readable, {
         headers: {
           'Content-Type': 'text/event-stream',
@@ -197,34 +205,21 @@ export class MCPObject {
       const response = await this._handleMessage(body);
       const event = `event: message\ndata: ${JSON.stringify(response)}\n\n`;
 
-      // Kirim event jika writer masih aktif, jika belum antri
       if (this.writer) {
         try {
           await this.writer.ready;
           await this.writer.write(new TextEncoder().encode(event));
         } catch (e) {
-          // Writer closed, taruh di antrian
           this.queue.push(event);
         }
       } else {
         this.queue.push(event);
       }
+
       return new Response('Accepted', { status: 202, headers: { 'Access-Control-Allow-Origin': '*' } });
     }
 
     return new Response('Not Found', { status: 404 });
-  }
-
-  async _startHeartbeat(encoder) {
-    this.keepAlive = setInterval(() => {
-      if (this.writer) {
-        try {
-          this.writer.write(encoder.encode(': keepalive\n\n')).catch(() => {});
-        } catch (e) {
-          // ignore, writer mungkin sudah ditutup
-        }
-      }
-    }, 30000);
   }
 
   async _drainQueue(encoder) {
@@ -234,7 +229,6 @@ export class MCPObject {
         await this.writer.ready;
         await this.writer.write(encoder.encode(msg));
       } catch (e) {
-        // Kembalikan ke antrian atau hentikan
         this.queue.unshift(msg);
         break;
       }
@@ -250,7 +244,6 @@ export class MCPObject {
   }
 
   async _handleMessage(msg) {
-    // JSON-RPC handling
     if (msg.method === 'initialize') {
       return {
         jsonrpc: '2.0',
