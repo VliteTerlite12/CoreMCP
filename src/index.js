@@ -8,17 +8,22 @@ const PINTEREST_HEADERS = {
 };
 
 // ====================== CORS HEADERS ======================
-// Semua response HARUS punya ini agar Claude.ai bisa akses
-const CORS = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, Accept, Cache-Control',
-};
+// Solusi ampuh: Tangkap header apa pun yang diminta Claude secara dinamis
+// untuk menghindari pemblokiran Preflight CORS.
+function getCorsHeaders(request) {
+  const reqHeaders = request.headers.get('Access-Control-Request-Headers') || '*';
+  return {
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+    'Access-Control-Allow-Headers': reqHeaders,
+    'Access-Control-Expose-Headers': '*',
+  };
+}
 
-function corsResponse(body, status = 200, extra = {}) {
+function corsResponse(request, body, status = 200, extra = {}) {
   return new Response(body, {
     status,
-    headers: { ...CORS, 'Content-Type': 'application/json', ...extra },
+    headers: { ...getCorsHeaders(request), 'Content-Type': 'application/json', ...extra },
   });
 }
 
@@ -186,12 +191,10 @@ const TOOLS = [
 async function handleMCPMessage(msg) {
   const { method, id, params } = msg;
 
-  // PENTING: Claude kirim notifikasi ini setelah initialize — harus di-handle
   if (method === 'notifications/initialized') {
-    return null; // Notifikasi tidak perlu response
+    return null;
   }
 
-  // Ping — Claude kadang kirim ini untuk cek koneksi
   if (method === 'ping') {
     return { jsonrpc: '2.0', id, result: {} };
   }
@@ -201,7 +204,6 @@ async function handleMCPMessage(msg) {
       jsonrpc: '2.0',
       id,
       result: {
-        // PENTING: Versi protokol HARUS persis seperti ini
         protocolVersion: '2024-11-05',
         capabilities: {
           tools: { listChanged: false },
@@ -223,7 +225,6 @@ async function handleMCPMessage(msg) {
       id,
       result: {
         tools: TOOLS,
-        // nextCursor harus ada (null = tidak ada halaman lagi)
         nextCursor: null,
       },
     };
@@ -267,7 +268,6 @@ async function handleMCPMessage(msg) {
     }
   }
 
-  // Resources & prompts — Claude kadang tanya ini
   if (method === 'resources/list') {
     return { jsonrpc: '2.0', id, result: { resources: [], nextCursor: null } };
   }
@@ -275,7 +275,6 @@ async function handleMCPMessage(msg) {
     return { jsonrpc: '2.0', id, result: { prompts: [], nextCursor: null } };
   }
 
-  // Method tidak dikenal
   return {
     jsonrpc: '2.0',
     id,
@@ -297,45 +296,40 @@ export class MCPSession {
   async fetch(request) {
     const url = new URL(request.url);
 
-    // OPTIONS preflight
     if (request.method === 'OPTIONS') {
-      return new Response(null, { status: 204, headers: CORS });
+      return new Response(null, { status: 204, headers: getCorsHeaders(request) });
     }
 
-    // GET /sse — buka SSE stream
     if (request.method === 'GET') {
-      return this._openSSE(request);
+      return this._openSSE(request, url);
     }
 
-    // POST /message — terima pesan dari client
     if (request.method === 'POST') {
       return this._receiveMessage(request);
     }
 
-    return new Response('Method Not Allowed', { status: 405, headers: CORS });
+    return new Response('Method Not Allowed', { status: 405, headers: getCorsHeaders(request) });
   }
 
-  _openSSE(request) {
+  _openSSE(request, url) {
     const { writable, readable } = new TransformStream();
     this.writer = writable.getWriter();
-    const sessionId = this.state.id.name;
+    
+    const sessionId = url.searchParams.get('sessionId');
+    // Format Wajib MCP/Claude: Absolute URL untuk endpoint pesan
+    const baseUrl = `${url.protocol}//${url.host}`;
 
-    // Jalankan async di background — JANGAN await di sini (deadlock)
     (async () => {
       try {
-        // 1. Kirim endpoint event — Claude butuh ini untuk tahu ke mana POST
-        // Format: event: endpoint\ndata: <url>\n\n
-        await this._send(`event: endpoint\ndata: /message?sessionId=${sessionId}\n\n`);
+        await this._send(`event: endpoint\ndata: ${baseUrl}/message?sessionId=${sessionId}\n\n`);
 
-        // 2. Drain queue (pesan yang datang sebelum SSE terbuka)
         await this._drainQueue();
 
-        // 3. Heartbeat setiap 25 detik (Cloudflare timeout = 30 detik)
+        // Cloudflare otomatis kirim : keepalive, tapi ini sebagai fallback tambahan
         this.heartbeatTimer = setInterval(() => {
           this._send(': ping\n\n').catch(() => this._cleanup());
-        }, 25000);
+        }, 20000);
 
-        // 4. Tunggu disconnect
         await new Promise(resolve => request.signal.addEventListener('abort', resolve));
       } finally {
         this._cleanup();
@@ -345,7 +339,7 @@ export class MCPSession {
     return new Response(readable, {
       status: 200,
       headers: {
-        ...CORS,
+        ...getCorsHeaders(request),
         'Content-Type': 'text/event-stream; charset=utf-8',
         'Cache-Control': 'no-cache, no-transform',
         'Connection': 'keep-alive',
@@ -359,10 +353,9 @@ export class MCPSession {
     try {
       body = await request.json();
     } catch {
-      return corsResponse(JSON.stringify({ error: 'Invalid JSON' }), 400);
+      return corsResponse(request, JSON.stringify({ error: 'Invalid JSON' }), 400);
     }
 
-    // Handle array (batch) atau single message
     const messages = Array.isArray(body) ? body : [body];
     const responses = [];
 
@@ -371,7 +364,6 @@ export class MCPSession {
       if (response !== null) responses.push(response);
     }
 
-    // Kirim setiap response sebagai SSE event
     for (const resp of responses) {
       const event = `event: message\ndata: ${JSON.stringify(resp)}\n\n`;
       if (this.writer) {
@@ -381,13 +373,14 @@ export class MCPSession {
       }
     }
 
-    return new Response('', { status: 202, headers: CORS });
+    // [KRITIKAL] Spesifikasi MCP mewajibkan Response 202 dengan BODY KOSONG.
+    // Jika tidak kosong, parsing Claude bisa gagal total.
+    return new Response(null, { status: 202, headers: getCorsHeaders(request) });
   }
 
   async _send(text) {
     if (!this.writer) return;
     try {
-      await this.writer.ready;
       await this.writer.write(this.encoder.encode(text));
     } catch {
       this._cleanup();
@@ -412,47 +405,46 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
 
-    // OPTIONS untuk semua path
+    // Tangani OPTIONS CORS dari Claude
     if (request.method === 'OPTIONS') {
-      return new Response(null, { status: 204, headers: CORS });
+      return new Response(null, { status: 204, headers: getCorsHeaders(request) });
     }
 
-    // Health check
     if (url.pathname === '/' || url.pathname === '/health') {
-      return corsResponse(JSON.stringify({
+      return corsResponse(request, JSON.stringify({
         name: 'pinterest-mcp-server',
         version: '1.0.0',
         status: 'ok',
         transport: 'SSE (2024-11-05)',
-        endpoints: { sse: '/sse', message: '/message?sessionId=<id>' },
       }));
     }
 
-    // SSE endpoint — Claude.ai connect ke sini
     if (url.pathname === '/sse') {
       if (request.method !== 'GET') {
-        return new Response('GET required for SSE', { status: 405, headers: CORS });
+        return new Response('GET required for SSE', { status: 405, headers: getCorsHeaders(request) });
       }
+      
       const sessionId = crypto.randomUUID();
       const doId = env.MCP_SESSION.idFromName(sessionId);
       const stub = env.MCP_SESSION.get(doId);
-      return stub.fetch(request);
+      
+      const doUrl = new URL(request.url);
+      doUrl.searchParams.set('sessionId', sessionId);
+      const doRequest = new Request(doUrl.toString(), request);
+      
+      return stub.fetch(doRequest);
     }
 
-    // Message endpoint — Claude.ai POST ke sini
     if (url.pathname === '/message') {
       const sessionId = url.searchParams.get('sessionId');
-      if (!sessionId) {
-        return corsResponse(JSON.stringify({ error: 'Missing sessionId' }), 400);
+      if (!sessionId || sessionId === 'undefined') {
+        return corsResponse(request, JSON.stringify({ error: 'Missing or invalid sessionId' }), 400);
       }
       const doId = env.MCP_SESSION.idFromName(sessionId);
       const stub = env.MCP_SESSION.get(doId);
       return stub.fetch(request);
     }
 
-    return corsResponse(JSON.stringify({
-      error: 'Not Found',
-      hint: 'Connect to /sse to start an MCP session',
-    }), 404);
+    return corsResponse(request, JSON.stringify({ error: 'Not Found' }), 404);
   },
 };

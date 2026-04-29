@@ -7,8 +7,6 @@ workers_dev = true
 name = "MCP_SESSION"
 class_name = "MCPSession"
 
-# new_sqlite_classes = untuk Free plan (GRATIS)
-# new_classes = untuk Paid plan saja ($5/bulan)
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["MCPSession"]
