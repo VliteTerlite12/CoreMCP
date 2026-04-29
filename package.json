@@ -1,0 +1,15 @@
+{
+  "name": "pinterest-mcp",
+  "version": "1.0.0",
+  "description": "MCP Server for Pinterest (no login) — SSE transport on Cloudflare Workers",
+  "main": "src/index.js",
+  "private": true,
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^3.0.0"
+  },
+  "license": "MIT"
+}
