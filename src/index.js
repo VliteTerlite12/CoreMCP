@@ -1,18 +1,17 @@
 // pinterest-mcp-worker.js
-// Deploy sebagai Cloudflare Worker + Durable Object
+// Cloudflare Worker + Durable Object untuk MCP Pinterest (SSE transport)
 
-// ====================== KONFIGURASI & HEADER ======================
 const HEADERS = {
   'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
   'Accept-Language': 'en-US,en;q=0.9',
 };
 
-// ====================== PINTEREST API (Fetch Native) ======================
+// ====================== PINTEREST API ======================
 async function pinterestAPI(resource, options) {
   const url = `https://www.pinterest.com/resource/${resource}/get/`;
   const params = new URLSearchParams({
     data: JSON.stringify({ options, context: {} }),
-    _: Date.now()
+    _: Date.now(),
   });
   const res = await fetch(`${url}?${params}`, {
     headers: {
@@ -24,11 +23,10 @@ async function pinterestAPI(resource, options) {
   return res.json();
 }
 
-// ====================== HELPERS UNTUK PARSING ======================
+// ====================== HELPERS ======================
 function toOriginal(src) {
   return src.replace(/\/\d+x\//, '/originals/').replace(/\/\d+x\d+\//, '/originals/');
 }
-
 function isValidPin(src) {
   return (
     src.includes('i.pinimg.com') &&
@@ -37,7 +35,6 @@ function isValidPin(src) {
     !src.includes('/videos/thumbnails/')
   );
 }
-
 function extractVidsFromHtml(html, limit) {
   const seen = new Set();
   const vids = [];
@@ -53,35 +50,30 @@ function extractVidsFromHtml(html, limit) {
   return vids;
 }
 
-// HTMLRewriter handler untuk mengambil src gambar
 class ImgExtractor {
-  constructor() {
-    this.srcs = [];
-  }
+  constructor() { this.srcs = []; }
   element(element) {
     const src = element.getAttribute('src');
     if (src) this.srcs.push(src);
   }
 }
-
 async function extractImagesFromHTML(html, limit) {
   const handler = new ImgExtractor();
   const rewriter = new HTMLRewriter().on('img', handler);
-  await rewriter.transform(new Response(html)).text();
+  const resp = new Response(html);
+  await rewriter.transform(resp).text();
   const filtered = handler.srcs.filter(src => isValidPin(src)).map(src => toOriginal(src));
   return [...new Set(filtered)].slice(0, limit);
 }
-
 function isPinterestUrl(query) {
   return query.includes('pinterest.com/pin/') || query.includes('pin.it/');
 }
-
 async function resolvePinUrl(shortUrl) {
   const resp = await fetch(shortUrl, { headers: HEADERS, redirect: 'follow' });
   return resp.url;
 }
 
-// ====================== TOOL IMPLEMENTATION ======================
+// ====================== SEARCH FUNCTIONS ======================
 async function searchBoards(query, limit) {
   const l = Math.min(limit, 50);
   const data = await pinterestAPI('BoardSearchResource', { query, page_size: l });
@@ -91,7 +83,7 @@ async function searchBoards(query, limit) {
     name: b.name,
     url: `https://www.pinterest.com${b.url}`,
     pinCount: b.pin_count,
-    owner: b.owner?.username
+    owner: b.owner?.username,
   })).slice(0, l);
 }
 
@@ -104,7 +96,7 @@ async function searchUsers(query, limit) {
     username: u.username,
     fullName: u.full_name,
     avatar: u.image_medium_url,
-    url: `https://www.pinterest.com/${u.username}/`
+    url: `https://www.pinterest.com/${u.username}/`,
   })).slice(0, l);
 }
 
@@ -119,11 +111,7 @@ async function searchContent(query, limit) {
     const html = await resp.text();
     const vids = extractVidsFromHtml(html, l);
     const imgs = await extractImagesFromHTML(html, l);
-    return {
-      url: resolvedUrl,
-      videos: vids,
-      images: imgs
-    };
+    return { url: resolvedUrl, videos: vids, images: imgs };
   } else {
     const data = await pinterestAPI('SearchResource', { query, scope: 'pins', page_size: l });
     const pins = data?.resource_response?.data || [];
@@ -131,79 +119,73 @@ async function searchContent(query, limit) {
       id: p.id,
       title: p.title || p.grid_title || '',
       image: p.images?.orig?.url || p.images?.['736x']?.url || '',
-      url: `https://www.pinterest.com/pin/${p.id}/`
+      url: `https://www.pinterest.com/pin/${p.id}/`,
     })).slice(0, l);
   }
 }
 
-// ====================== MCP DURABLE OBJECT (SSE TRANSPORT) ======================
+// ====================== DURABLE OBJECT (MCP SSE TRANSPORT) ======================
 export class MCPObject {
   constructor(state, env) {
     this.state = state;
-    this.writer = null;
     this.queue = [];
-    this.writerReady = new Promise(resolve => { this._resolveWriter = resolve; });
+    this.writer = null;
+    this.keepAlive = null;
   }
 
   async fetch(request) {
     const url = new URL(request.url);
 
-    // CORS preflight
     if (request.method === 'OPTIONS') {
       return new Response(null, {
-        headers: {
-          'Access-Control-Allow-Origin': '*',
-          'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-        }
+        headers: { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'GET, POST, OPTIONS' },
       });
     }
 
-    // SSE connection (client connect)
     if (request.method === 'GET') {
+      // SSE connection
       const { writable, readable } = new TransformStream();
       this.writer = writable.getWriter();
       const encoder = new TextEncoder();
 
-      // Kirim endpoint event dengan sessionId
-      const sessionId = this.state.id.name; // Sama dengan sessionId yang dipakai di URL
+      // Kirim endpoint event + heartbeat dalam background
+      this._startHeartbeat(encoder);
+
+      // Kirim event endpoint dengan sessionId
+      const sessionId = this.state.id.name; // Sama dengan sessionId di URL
       const endpointEvent = `event: endpoint\ndata: /message?sessionId=${sessionId}\n\n`;
-      this.writer.write(encoder.encode(endpointEvent));
 
-      // Tandai writer siap & kirim antrian jika ada
-      this._resolveWriter();
-      this.drainQueue();
+      try {
+        await this.writer.ready;
+        await this.writer.write(encoder.encode(endpointEvent));
+      } catch (e) {
+        // Client mungkin sudah disconnect
+        this._cleanup();
+        return new Response(null, { status: 500 });
+      }
 
-      // Jaga koneksi tetap terbuka (heartbeat setiap 30 detik)
-      const keepAlive = setInterval(() => {
-        if (this.writer) {
-          this.writer.write(encoder.encode(': keepalive\n\n')).catch(() => {});
-        }
-      }, 30000);
+      // Setelah kirim endpoint, kirim antrian jika ada (biasanya kosong)
+      await this._drainQueue(encoder);
 
-      // Tunggu sampai client disconnect
+      // Tunggu koneksi ditutup client
       await new Promise(resolve => {
         request.signal.addEventListener('abort', () => {
-          clearInterval(keepAlive);
           resolve();
         });
       });
 
-      clearInterval(keepAlive);
-      if (this.writer) {
-        await this.writer.close().catch(() => {});
-        this.writer = null;
-      }
+      this._cleanup();
       return new Response(readable, {
         headers: {
           'Content-Type': 'text/event-stream',
           'Cache-Control': 'no-cache',
           'Connection': 'keep-alive',
           'Access-Control-Allow-Origin': '*',
-        }
+          'X-Accel-Buffering': 'no',
+        },
       });
     }
 
-    // POST /message → proses JSON-RPC
     if (request.method === 'POST') {
       let body;
       try {
@@ -212,12 +194,18 @@ export class MCPObject {
         return new Response('Invalid JSON', { status: 400, headers: { 'Access-Control-Allow-Origin': '*' } });
       }
 
-      const response = await this.handleMessage(body);
+      const response = await this._handleMessage(body);
       const event = `event: message\ndata: ${JSON.stringify(response)}\n\n`;
 
-      // Jika writer sudah ada, langsung tulis; jika belum, antri
+      // Kirim event jika writer masih aktif, jika belum antri
       if (this.writer) {
-        await this.writer.write(new TextEncoder().encode(event));
+        try {
+          await this.writer.ready;
+          await this.writer.write(new TextEncoder().encode(event));
+        } catch (e) {
+          // Writer closed, taruh di antrian
+          this.queue.push(event);
+        }
       } else {
         this.queue.push(event);
       }
@@ -227,14 +215,41 @@ export class MCPObject {
     return new Response('Not Found', { status: 404 });
   }
 
-  async drainQueue() {
+  async _startHeartbeat(encoder) {
+    this.keepAlive = setInterval(() => {
+      if (this.writer) {
+        try {
+          this.writer.write(encoder.encode(': keepalive\n\n')).catch(() => {});
+        } catch (e) {
+          // ignore, writer mungkin sudah ditutup
+        }
+      }
+    }, 30000);
+  }
+
+  async _drainQueue(encoder) {
     while (this.queue.length > 0 && this.writer) {
       const msg = this.queue.shift();
-      await this.writer.write(new TextEncoder().encode(msg));
+      try {
+        await this.writer.ready;
+        await this.writer.write(encoder.encode(msg));
+      } catch (e) {
+        // Kembalikan ke antrian atau hentikan
+        this.queue.unshift(msg);
+        break;
+      }
     }
   }
 
-  async handleMessage(msg) {
+  _cleanup() {
+    if (this.keepAlive) clearInterval(this.keepAlive);
+    if (this.writer) {
+      this.writer.close().catch(() => {});
+      this.writer = null;
+    }
+  }
+
+  async _handleMessage(msg) {
     // JSON-RPC handling
     if (msg.method === 'initialize') {
       return {
@@ -243,8 +258,8 @@ export class MCPObject {
         result: {
           protocolVersion: '0.1.0',
           capabilities: { tools: {} },
-          serverInfo: { name: 'pinterest-mcp-server', version: '1.0.0' }
-        }
+          serverInfo: { name: 'pinterest-mcp-server', version: '1.0.0' },
+        },
       };
     }
 
@@ -260,11 +275,11 @@ export class MCPObject {
               inputSchema: {
                 type: 'object',
                 properties: {
-                  query: { type: 'string', description: 'Search term' },
-                  limit: { type: 'number', default: 10 }
+                  query: { type: 'string' },
+                  limit: { type: 'number', default: 10 },
                 },
-                required: ['query']
-              }
+                required: ['query'],
+              },
             },
             {
               name: 'pinterest_user_search',
@@ -273,25 +288,25 @@ export class MCPObject {
                 type: 'object',
                 properties: {
                   query: { type: 'string' },
-                  limit: { type: 'number', default: 10 }
+                  limit: { type: 'number', default: 10 },
                 },
-                required: ['query']
-              }
+                required: ['query'],
+              },
             },
             {
               name: 'pinterest_content_search',
-              description: 'Search Pinterest pins by keyword OR extract media from a pin URL',
+              description: 'Search Pinterest pins by keyword or extract media from a pin URL',
               inputSchema: {
                 type: 'object',
                 properties: {
-                  query: { type: 'string', description: 'Search query or Pinterest pin URL' },
-                  limit: { type: 'number', default: 10 }
+                  query: { type: 'string' },
+                  limit: { type: 'number', default: 10 },
                 },
-                required: ['query']
-              }
-            }
-          ]
-        }
+                required: ['query'],
+              },
+            },
+          ],
+        },
       };
     }
 
@@ -312,14 +327,10 @@ export class MCPObject {
         return {
           jsonrpc: '2.0',
           id: msg.id,
-          result: { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] }
+          result: { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] },
         };
       } catch (err) {
-        return {
-          jsonrpc: '2.0',
-          id: msg.id,
-          error: { code: -32000, message: err.message }
-        };
+        return { jsonrpc: '2.0', id: msg.id, error: { code: -32000, message: err.message } };
       }
     }
 
@@ -327,12 +338,11 @@ export class MCPObject {
   }
 }
 
-// ====================== CLOUDFLARE WORKER ENTRY POINT ======================
+// ====================== WORKER ENTRY POINT ======================
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
 
-    // Buat/gabung sesi melalui Durable Object
     if (url.pathname === '/sse') {
       const sessionId = crypto.randomUUID();
       const doId = env.MCP_OBJECT.idFromName(sessionId);
@@ -351,5 +361,5 @@ export default {
     }
 
     return new Response('MCP Pinterest Server. Use /sse to connect.', { status: 404 });
-  }
+  },
 };
