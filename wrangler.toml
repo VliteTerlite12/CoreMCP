@@ -1,7 +1,7 @@
 name = "pinterest-mcp"
 main = "src/index.js"
 compatibility_date = "2024-12-18"
-workers_dev = true   # agar dapat URL .workers.dev
+workers_dev = true
 
 [[durable_objects.bindings]]
 name = "MCP_OBJECT"
@@ -9,4 +9,4 @@ class_name = "MCPObject"
 
 [[migrations]]
 tag = "v1"
-new_classes = ["MCPObject"]
+new_sqlite_classes = ["MCPObject"]
