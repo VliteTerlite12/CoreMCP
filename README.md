@@ -1,6 +1,6 @@
-# Pinterest MCP Server
+# Core MCP Server
 
-MCP Server untuk Pinterest tanpa login, berjalan di Cloudflare Workers dengan Durable Objects.
+MCP Server untuk service mu, berjalan di Cloudflare Workers dengan Durable Objects.
 
 ## Cara Deploy
 
@@ -16,13 +16,13 @@ npm run deploy
 ```
 
 Setelah deploy, kamu akan dapat URL seperti:
-`https://pinterest-mcp.<username>.workers.dev`
+`https://cmcp.<username>.workers.dev`
 
 ## Cara Hubungkan ke Claude.ai
 
 1. Buka **claude.ai** → Settings → **Connectors**
 2. Klik **"Add custom connector"**
-3. Masukkan URL SSE: `https://pinterest-mcp.<username>.workers.dev/sse`
+3. Masukkan URL SSE: `https://cmcp.<username>.workers.dev/sse`
 4. Simpan dan reconnect
 
 ## Endpoints
@@ -32,12 +32,6 @@ Setelah deploy, kamu akan dapat URL seperti:
 | `/sse` | GET | SSE stream — Claude connect ke sini |
 | `/message?sessionId=<id>` | POST | Terima JSON-RPC dari Claude |
 | `/health` | GET | Status server |
-
-## Tools yang Tersedia
-
-- `pinterest_board_search` — Cari board Pinterest
-- `pinterest_user_search` — Cari user Pinterest  
-- `pinterest_content_search` — Cari pin atau ekstrak media dari URL pin
 
 ## Apa yang Diperbaiki
 

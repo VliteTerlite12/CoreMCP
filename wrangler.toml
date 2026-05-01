@@ -7,7 +7,6 @@ workers_dev = true
 name = "MCP_OBJECT"
 class_name = "MCPObject"
 
-# new_sqlite_classes = untuk Free plan (GRATIS)
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["MCPObject"]

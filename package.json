@@ -1,15 +1,14 @@
 {
-  "name": "pinterest-mcp",
-  "version": "1.0.0",
-  "description": "MCP Server for Pinterest (no login) — SSE transport on Cloudflare Workers",
+  "name": "core-mcp",
+  "version": "2.1.0",
+  "description": "Modular MCP server with Wikipedia, Pinterest, and TV schedule tools",
   "main": "src/index.js",
-  "private": true,
+  "type": "module",
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy"
   },
   "devDependencies": {
-    "wrangler": "^3.0.0"
-  },
-  "license": "MIT"
+    "wrangler": "latest"
+  }
 }
