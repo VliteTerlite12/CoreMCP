@@ -1,49 +1,50 @@
-# Core MCP Server
+# CoreMCP — Modular MCP Server for Cloudflare Workers
 
-MCP Server untuk service mu, berjalan di Cloudflare Workers dengan Durable Objects.
+Server Model Context Protocol (MCP) untuk Cloudflare Workers, dengan **HTTP+SSE** dan **Streamable HTTP** (`/mcp`) — kompatibel dengan Claude.ai, GitHub Copilot, dan klien MCP lainnya.
+
+## Fitur
+
+| Modul | Tools | Sumber |
+|-------|-------|--------|
+| 📚 **Wikipedia** | `wiki_quick` `wiki_readmore` `wiki_deep` | EN + ID |
+| 📌 **Pinterest** | `pinterest_user_search` `pinterest_global_search` | api.siputzx.my.id |
+| 📺 **Jadwal TV** | `list_channeltv` `rincian_jadwaltv` | api.siputzx.my.id |
+| 📝 **Gist GitHub** | `index_gist` `read_gist` `user_gist` | api.github.com/gists |
+| 🐙 **GitHub** | `github_user_profile` `github_user_repos` `github_search_repos` `github_search_users` `github_search_code` `github_repo_info` `github_repo_readme` `github_repo_contents` `github_repo_releases` `github_repo_contributors` `github_repo_languages` `github_repo_commits` `github_org_repos` `github_public_events` | api.github.com |
+
+## Struktur
+
+```
+src/
+index.js          → Router MCP, Durable Object, SSE & /mcp
+modul/
+wikipedia.js    → Wikipedia EN + ID
+pinterest.js    → Pinterest user & search
+jadwaltv.js     → Jadwal TV Indonesia
+gist-github.js  → GitHub Gist
+github.js       → GitHub anonymous API
+```
+
+## Rate Limits
+
+- **Wikipedia**: No rate limit
+- **Pinterest/TV**: No strict limit (via proxy)
+- **GitHub anonymous**: **60 req/jam per IP**. Untuk production, tambahkan token di env vars.
+- **GitHub Search**: 10 req/menit (unauthenticated)
 
 ## Cara Deploy
 
-```bash
-# 1. Install wrangler
-npm install
+1. `npm install -g wrangler`
+2. Konfigurasi `wrangler.toml`
+3. `wrangler deploy`
 
-# 2. Login ke Cloudflare
-npx wrangler login
+## Penggunaan
 
-# 3. Deploy
-npm run deploy
-```
+- **Claude.ai**: `POST https://<worker>/mcp`
+- **SSE**: `GET /sse` lalu `POST /message?sessionId=...`
 
-Setelah deploy, kamu akan dapat URL seperti:
-`https://cmcp.<username>.workers.dev`
+## Menambah Modul
 
-## Cara Hubungkan ke Claude.ai
-
-1. Buka **claude.ai** → Settings → **Connectors**
-2. Klik **"Add custom connector"**
-3. Masukkan URL SSE: `https://cmcp.<username>.workers.dev/sse`
-4. Simpan dan reconnect
-
-## Endpoints
-
-| Endpoint | Method | Keterangan |
-|----------|--------|------------|
-| `/sse` | GET | SSE stream — Claude connect ke sini |
-| `/message?sessionId=<id>` | POST | Terima JSON-RPC dari Claude |
-| `/health` | GET | Status server |
-
-## Apa yang Diperbaiki
-
-| Masalah Lama | Perbaikan |
-|---|---|
-| `protocolVersion: '0.1.0'` | ✅ Diubah ke `'2024-11-05'` |
-| Tidak ada handler `notifications/initialized` | ✅ Ditambahkan (return null = no response needed) |
-| Tidak ada handler `ping` | ✅ Ditambahkan |
-| Tidak ada handler `resources/list` & `prompts/list` | ✅ Ditambahkan |
-| CORS header tidak lengkap di semua response | ✅ CORS diterapkan ke semua endpoint |
-| `new_sqlite_classes` deprecated di wrangler.toml | ✅ Diubah ke `new_classes` |
-| Binding nama `MCP_OBJECT` tidak konsisten | ✅ Diganti `MCP_SESSION` konsisten |
-| Tidak ada `nextCursor` di tools/list | ✅ Ditambahkan `nextCursor: null` |
-| Error di tools/call tidak sesuai spec | ✅ Pakai format `isError: true` |
-| Heartbeat 30s bisa timeout Cloudflare | ✅ Dikurangi jadi 25 detik |
+1. Buat file di `src/modul/`
+2. Ekspor `tools` (array definisi) dan `handleTool(name, args, env)`
+3. Import di `src/index.js`, tambahkan ke `ALL_TOOLS` dan rantai handler.
