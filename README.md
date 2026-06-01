@@ -11,6 +11,7 @@ Server Model Context Protocol (MCP) untuk Cloudflare Workers, dengan **HTTP+SSE*
 | 📺 **Jadwal TV** | `list_channeltv` `rincian_jadwaltv` | api.siputzx.my.id |
 | 📝 **Gist GitHub** | `index_gist` `read_gist` `user_gist` | api.github.com/gists |
 | 🐙 **GitHub** | `github_user_profile` `github_user_repos` `github_search_repos` `github_search_users` `github_search_code` `github_repo_info` `github_repo_readme` `github_repo_contents` `github_repo_releases` `github_repo_contributors` `github_repo_languages` `github_repo_commits` `github_org_repos` `github_public_events` | api.github.com |
+| 📦 **SPX Tracking** | `track_spx` | r.jina.ai / spx.co.id |
 
 ## Struktur
 
@@ -23,6 +24,7 @@ pinterest.js    → Pinterest user & search
 jadwaltv.js     → Jadwal TV Indonesia
 gist-github.js  → GitHub Gist
 github.js       → GitHub anonymous API
+spx.js          → SPX Express Tracking (Markdown via r.jina.ai)
 ```
 
 ## Rate Limits

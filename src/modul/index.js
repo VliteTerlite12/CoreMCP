@@ -6,6 +6,7 @@ import { tools as pinTools, handleTool as pinHandler } from './pinterest.js';
 import { tools as tvTools, handleTool as tvHandler } from './jadwaltv.js';
 import { tools as gistTools, handleTool as gistHandler } from './gist-github.js';
 import { tools as ghTools, handleTool as ghHandler } from './github.js';
+import { tools as spxTools, handleTool as spxHandler } from './spx.js';
 
 // Daftarkan pasangan tools + handler di sini (urutan tidak penting)
 export const MODULES = [
@@ -14,4 +15,5 @@ export const MODULES = [
   { tools: tvTools, handler: tvHandler },
   { tools: gistTools, handler: gistHandler },
   { tools: ghTools, handler: ghHandler },
+  { tools: spxTools, handler: spxHandler },
 ];
